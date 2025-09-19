@@ -144,36 +144,18 @@ function ue_provider:get_completions(context, callback)
     return
   end
 
-  -- ▼▼▼ ここからが今回の修正の核心です ▼▼▼
-  -- context.keywordに頼らず、カーソル前のテキストから手動で補完対象の単語を特定します。
-  local keyword_to_replace = ""
-  local keyword_match = string.match(line_before_cursor, "(\\w*)$")
-  if keyword_match then
-    keyword_to_replace = keyword_match
-  end
-  -- ▲▲▲ ここまで ▲▲▲
-
+  -- ▼▼▼ これが最終形です ▼▼▼
+  -- textEdit を完全に削除し、最も基本的な情報だけを提供します。
+  -- これにより、blink.cmpが最も安定したデフォルトの置換処理を行います。
   local items = {}
   for _, spec in ipairs(specifiers_db) do
     table.insert(items, {
       label = spec.label,
       kind = completion_item_kind.Keyword,
       documentation = spec.documentation,
-      textEdit = {
-        newText = spec.label,
-        range = {
-          start = {
-            line = cursor[1] - 1,
-            character = cursor[2] - #keyword_to_replace, -- 手動で特定した単語の長さを使用
-          },
-          ['end'] = {
-            line = cursor[1] - 1,
-            character = cursor[2],
-          },
-        },
-      },
     })
   end
+  -- ▲▲▲ ここまで ▲▲▲
 
   callback({
     is_incomplete_backward = false,
