@@ -5,7 +5,7 @@ A context-aware blink.cmp source for Unreal Engine C++ macro specifiers 🧠 Neo
 <table>
   <tr>
    <td><div align=center>
-      <img width="100%" alt="Context-aware completion for UPROPERTY" src="https://raw.githubusercontent.com/taku25/blink-cmp-unreal/assets/main_image.png" />
+      <img width="100%" alt="Context-aware completion for UPROPERTY" src="https://raw.githubusercontent.com/taku25/blink-cmp-unreal/images/assets/main_image.png" />
    </div></td>
   </tr>
 </table>
