@@ -32,6 +32,7 @@ end
 -- UCLASS/UPROPERTY/UFUNCTIONなどの基本指定子
 local uclass_specifiers = {
   { label = 'Abstract', documentation = 'Declares this class as an "abstract base class", which prevents users from adding Actors of this class to Levels.' },
+  { label = 'abstract', documentation = 'Declares this class as an "abstract base class", which prevents users from adding Actors of this class to Levels.' },
   { label = 'Blueprintable', documentation = 'Exposes this class as an acceptable base class for creating Blueprints.' },
   { label = 'BlueprintType', documentation = 'Exposes this class as a type that can be used for variables in Blueprints.' },
   { label = 'Config', documentation = 'Indicates that the class can store data in a configuration file (.ini). Example: Config=Game' },
