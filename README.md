@@ -85,15 +85,23 @@ By default, completion for all macros is enabled.
 ```
 
 ### Configurable Options
+Of course. Here is the English version of the Markdown table.
 
-| Option                | Default | Description                               |
-| :-------------------- | :-----: | :---------------------------------------- |
-| `enable_uclass`       | `true`  | Enables completion for `UCLASS` specifiers.    |
-| `enable_uproperty`    | `true`  | Enables completion for `UPROPERTY` specifiers. |
-| `enable_ufunction`    | `true`  | Enables completion for `UFUNCTION` specifiers. |
-| `enable_ustruct`      | `true`  | Enables completion for `USTRUCT` specifiers.   |
-| `enable_uenum`        | `true`  | Enables completion for `UENUM` specifiers.     |
-| `enable_uinterface`   | `true`  | Enables completion for `UINTERFACE` specifiers.|
+### Available Options
+
+| Option | Default Value | Description |
+| :--- | :---: | :--- |
+| `enable_uclass` | `true` | Enables completion for `UCLASS` specifiers. |
+| `enable_uproperty` | `true` | Enables completion for `UPROPERTY` specifiers. |
+| `enable_ufunction` | `true` | Enables completion for `UFUNCTION` specifiers. |
+| `enable_ustruct` | `true` | Enables completion for `USTRUCT` specifiers. |
+| `enable_uenum` | `true` | Enables completion for `UENUM` specifiers. |
+| `enable_uinterface` | `true` | Enables completion for `UINTERFACE` specifiers. |
+| `enable_meta_specifiers` | `true` | Enables completion for keywords used within the `meta` specifier (e.g., `DisplayName`). |
+| `enable_delegate_macros` | `true` | Enables completion for delegate-related macros such as `DECLARE_DELEGATE`. |
+| `enable_module_macros` | `true` | Enables completion for module-related macros such as `IMPLEMENT_MODULE`. |
+| `enable_log_levels` | `true` | Enables completion for log levels used in `UE_LOG` (e.g., `Log`, `Warning`). |
+| `enable_slate_macros` | `true` | Enables completion for Slate UI framework-related macros (e.g., `SLATE_BEGIN_ARGS`). |
 
 ## 📜 License
 

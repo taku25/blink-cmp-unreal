@@ -85,16 +85,26 @@ return {
 ```
 
 ### 設定可能なオプション
+はい、承知いたしました。
+ご提示いただいたMarkdownテーブルに、新しいパラメータとその説明を追加して更新します。
 
-| オプション            | デフォルト値 | 説明                                     |
-| :-------------------- | :----------: | :--------------------------------------- |
-| `enable_uclass`       |    `true`    | `UCLASS` 指定子の補完を有効にします。    |
-| `enable_uproperty`    |    `true`    | `UPROPERTY` 指定子の補完を有効にします。 |
-| `enable_ufunction`    |    `true`    | `UFUNCTION` 指定子の補完を有効にします。 |
-| `enable_ustruct`      |    `true`    | `USTRUCT` 指定子の補完を有効にします。   |
-| `enable_uenum`        |    `true`    | `UENUM` 指定子の補完を有効にします。     |
-| `enable_uinterface`   |    `true`    | `UINTERFACE` 指定子の補完を有効にします。|
+Unreal Engineの各機能に対応する説明を加えました。
 
+### 設定可能なオプション
+
+| オプション | デフォルト値 | 説明 |
+| :--- | :---: | :--- |
+| `enable_uclass` | `true` | `UCLASS` 指定子の補完を有効にします。 |
+| `enable_uproperty` | `true` | `UPROPERTY` 指定子の補完を有効にします。 |
+| `enable_ufunction` | `true` | `UFUNCTION` 指定子の補完を有効にします。 |
+| `enable_ustruct` | `true` | `USTRUCT` 指定子の補完を有効にします。 |
+| `enable_uenum` | `true` | `UENUM` 指定子の補完を有効にします。 |
+| `enable_uinterface` | `true` | `UINTERFACE` 指定子の補完を有効にします。 |
+| `enable_meta_specifiers` | `true` | `meta` 指定子内で使われるキーワード (`DisplayName`など) の補完を有効にします。 |
+| `enable_delegate_macros` | `true` | `DECLARE_DELEGATE` などのデリゲート関連マクロの補完を有効にします。 |
+| `enable_module_macros` | `true` | `IMPLEMENT_MODULE` などのモジュール関連マクロの補完を有効にします。 |
+| `enable_log_levels` | `true` | `UE_LOG` で使用されるログレベル (`Log`, `Warning`など) の補完を有効にします。 |
+| `enable_slate_macros` | `true` | Slate UIフレームワーク関連のマクロ (`SLATE_BEGIN_ARGS`など) の補完を有効にします。 |
 
 ## 📜 ライセンス (License)
 
