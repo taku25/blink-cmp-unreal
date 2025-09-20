@@ -51,7 +51,6 @@ return {
             module = "blink-cmp-unreal",
             name = "unreal",
             score_offset = 15,
-            filetypes = { "cpp", "h" },
           },
         },
       },
