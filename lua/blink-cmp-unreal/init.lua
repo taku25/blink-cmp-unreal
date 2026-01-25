@@ -1,7 +1,10 @@
 local M = {}
 
+local unl_api_ok, unl_api = pcall(require, "UNL.api")
+local ts_parser_ok, ts_parser = pcall(require, "blink-cmp-unreal.ts_parser")
+
 --------------------------------------------------------------------------------
--- 1. デフォルト設定 (依存回避のためここに定義)
+-- 1. デフォルト設定
 --------------------------------------------------------------------------------
 local default_config = {
   enable_uclass = true,
@@ -15,12 +18,12 @@ local default_config = {
   enable_module_macros = true,
   enable_log_levels = true,
   enable_slate_macros = true,
+  enable_uep_member_completion = true,
 }
 
 --------------------------------------------------------------------------------
 -- 2. データ定義 (静的データ)
 --------------------------------------------------------------------------------
-
 local DB_STATIC = {
   UCLASS = {
     { label = 'Abstract', documentation = 'Prevents users from adding Actors of this class to Levels.' },
@@ -97,7 +100,6 @@ local DB_STATIC = {
 --------------------------------------------------------------------------------
 -- 3. デリゲート スニペット生成ロジック
 --------------------------------------------------------------------------------
-
 local SUFFIXES = {
   [0] = "", [1] = "_OneParam", [2] = "_TwoParams", [3] = "_ThreeParams",
   [4] = "_FourParams", [5] = "_FiveParams", [6] = "_SixParams",
@@ -116,44 +118,31 @@ local function generate_delegate_snippets()
   }
 
   for _, def in ipairs(definitions) do
-    for count = 0, 8 do -- 0〜8パラメータまで生成
+    for count = 0, 8 do
       local suffix = SUFFIXES[count]
       if suffix then
         local label = def.prefix .. suffix
         local idx = 1
         local args = {}
-
-        -- 1. 戻り値 (RetVal系)
         if def.type == 'retval' then
           table.insert(args, string.format("${%d:ReturnType}", idx))
           idx = idx + 1
         end
-
-        -- 2. OwningType (Event系)
         if def.type == 'event' then
           table.insert(args, string.format("${%d:OwningType}", idx))
           idx = idx + 1
         end
-
-        -- 3. DelegateName
         table.insert(args, string.format("${%d:FDelegateName}", idx))
         idx = idx + 1
-
-        -- 4. パラメータ群
         for i = 1, count do
-          -- 型
           table.insert(args, string.format("${%d:Type%d}", idx, i))
           idx = idx + 1
-          
-          -- 名前 (Dynamic系は必須、Raw系も利便性のため含める)
           if def.type == 'dynamic' then
             table.insert(args, string.format("${%d:Name%d}", idx, i))
             idx = idx + 1
           end
         end
-
         local snippet = string.format("%s(%s);", label, table.concat(args, ", "))
-
         table.insert(items, {
           label = label,
           kind = require('blink.cmp.types').CompletionItemKind.Snippet,
@@ -162,7 +151,7 @@ local function generate_delegate_snippets()
             value = string.format("**%s**\n\nArguments: %d\nMacro: %s", def.desc, count, label),
           },
           insertText = snippet,
-          insertTextFormat = 2, -- Snippet Format
+          insertTextFormat = 2,
           sortText = string.format("%s_%02d", def.prefix, count) 
         })
       end
@@ -171,22 +160,17 @@ local function generate_delegate_snippets()
   return items
 end
 
--- キャッシュ用
 local delegate_cache = nil
 
 --------------------------------------------------------------------------------
--- 4. コンテキスト解析ロジック
+-- 4. コンテキスト解析 / 型推論ロジック (再帰対応)
 --------------------------------------------------------------------------------
 
 local function get_context(line_text, col, config)
   local before_cursor = line_text:sub(1, col)
-
-  -- 1. UE_LOG の Verbosity
   if config.enable_log_levels and before_cursor:match('UE_LOG%s*%([^,]+,%s*[%w_]*$') then
     return { type = 'UE_LOG' }
   end
-
-  -- 2. マクロの中身
   local macro_capture = before_cursor:match('([%w_]+)%s*%([^%)]*$')
   if macro_capture then
     if macro_capture == 'UPROPERTY' and config.enable_uproperty then
@@ -201,30 +185,81 @@ local function get_context(line_text, col, config)
     elseif (macro_capture == 'UENUM' and config.enable_uenum) then return { type = 'UENUM' }
     end
   end
-
-  -- 3. Slate マクロ (行頭付近)
   if config.enable_slate_macros and before_cursor:match('^%s*SLATE_[%w_]*$') then
     return { type = 'SLATE_GLOBAL' }
   end
-
-  -- 4. グローバル (行頭) - DECLARE_ などをトリガー
   if config.enable_delegate_macros and before_cursor:match('^%s*DECLARE_[%w_]*$') then
     return { type = 'DELEGATE_GLOBAL' }
   end
-
   return nil
 end
 
+-- 再帰的に変数の型を解決する関数
+local function resolve_type_recursive(bufnr, cursor_row, var_name, callback)
+    if not ts_parser_ok then callback(nil, false); return end
+    
+    -- Tree-sitterで定義を探す
+    local type_name, is_pointer, rhs_text = ts_parser.get_var_type(bufnr, var_name, cursor_row)
+    
+    -- 1. 明示的な型、または単純な RHS で解決できた場合
+    if type_name then
+        callback(type_name, is_pointer)
+        return
+    end
+    
+    -- 2. auto かつ RHS が関数呼び出し (Obj->Func) の場合
+    if rhs_text then
+        local obj_name, func_name = rhs_text:match("([%w_]+)[%-%.>]+([%w_]+)")
+        if obj_name and func_name then
+            -- 再帰的に Obj の型を解決する
+            resolve_type_recursive(bufnr, cursor_row, obj_name, function(obj_type, obj_is_ptr)
+                if obj_type then
+                    -- Obj の型が分かったので、Func の戻り値を問い合わせる
+                    unl_api.provider.request("uep.get_class_members", { class_name = obj_type }, function(ok, members)
+                        if ok and members then
+                            for _, m in ipairs(members) do
+                                if m.name == func_name then
+                                    if m.return_type and m.return_type ~= "" then
+                                        -- 型名抽出の強化: _API マクロをスキップして実際の型名を探す
+                                        local ret_type = nil
+                                        for word in m.return_type:gmatch("[%w_]+") do
+                                            if not word:match("_API$") and word:match("^[AUFET]") then
+                                                ret_type = word
+                                                break
+                                            end
+                                        end
+                                        -- フォールバック: 従来の大文字開始マッチ
+                                        ret_type = ret_type or m.return_type:match("([A-Z]%w+)")
+                                        
+                                        if ret_type then
+                                            local ret_is_ptr = m.return_type:find("*") ~= nil
+                                            if not ret_is_ptr and m.return_type:find("Ptr") then ret_is_ptr = true end
+                                            callback(ret_type, ret_is_ptr)
+                                            return
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        callback(nil, false) -- 関数が見つからない、または戻り値なし
+                    end)
+                else
+                    callback(nil, false) -- Objの型不明
+                end
+            end)
+            return
+        end
+    end
+    
+    callback(nil, false)
+end
 --------------------------------------------------------------------------------
 -- 5. blink.cmp Source Interface Implementation
 --------------------------------------------------------------------------------
 
 function M.new(opts)
   local self = setmetatable({}, { __index = M })
-  
-  -- ★ 修正ポイント: require せず、ここでマージする
   self.config = vim.tbl_deep_extend('force', default_config, opts or {})
-  
   if not delegate_cache then
     delegate_cache = generate_delegate_snippets()
   end
@@ -232,16 +267,110 @@ function M.new(opts)
 end
 
 function M:get_trigger_characters()
-  return { '(', ',', ' ', '=', '_' }
+  return { '(', ',', ' ', '=', '_', '.', '>', ':' }
 end
 
 function M:get_completions(ctx, callback)
   local line_text = ctx.line
   local col = ctx.cursor[2]
+  local bufnr = ctx.bufnr
+  local cursor_row = ctx.cursor[1]
   
-  -- インスタンス変数として保持したconfigを使用
+  -- --------------------------------------------------------
+  -- A. UEP Member Completion (Async)
+  -- --------------------------------------------------------
+  if unl_api_ok and self.config.enable_uep_member_completion then
+      local before_cursor = line_text:sub(1, col)
+      local var_name_ptr = before_cursor:match("([%w_]+)%->[%w_]*$")
+      local var_name_dot = before_cursor:match("([%w_]+)%.[%w_]*$")
+      local type_name_scoped = before_cursor:match("([%w_]+)::[%w_]*$")
+      
+      local var_name = var_name_ptr or var_name_dot
+      
+      local is_static_context = (type_name_scoped ~= nil)
+      local is_instance_context = (var_name ~= nil)
+
+      if var_name or type_name_scoped then
+          -- 結果を表示する共通関数
+          local function fetch_members(class_name, cb)
+              unl_api.provider.request("uep.get_class_members", { class_name = class_name }, function(ok, members)
+                  if ok and members and #members > 0 then
+                      local items = {}
+                      local kinds = require('blink.cmp.types').CompletionItemKind
+                      for _, m in ipairs(members) do
+                          local is_this_access = (var_name == "this")
+                          if m.access == 'private' and not is_this_access then goto continue end
+
+                          local is_static_member = (m.is_static == 1) or (m.type == 'enum_item')
+                          
+                          if is_static_context then
+                              if not is_static_member then goto continue end
+                          elseif is_instance_context then
+                              if is_static_member then goto continue end
+                          end
+
+                          local kind = kinds.Field
+                          if m.type == "function" then kind = kinds.Method
+                          elseif m.type == "property" then kind = kinds.Property
+                          elseif m.type == "enum_item" then kind = kinds.EnumMember end
+                          
+                          local item_detail = m.detail or ""
+                          if m.flags and m.flags ~= "" then 
+                              item_detail = item_detail .. " [" .. m.flags .. "]" 
+                          end
+                          
+                          table.insert(items, {
+                              label = m.name,
+                              kind = kind,
+                              detail = item_detail,
+                              insertText = m.name,
+                              filterText = m.name,
+                              documentation = {
+                                  kind = 'markdown',
+                                  value = string.format("**%s**\nType: %s\nSignature: %s\nDefined in: %s", m.name, m.type, m.detail or "N/A", m.class_name or class_name)
+                              }
+                          })
+                          ::continue::
+                      end
+                      cb({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+                  else
+                      cb()
+                  end
+              end)
+          end
+
+          -- Type Resolution Logic
+          if type_name_scoped then
+              -- Static access (ClassName::) -> No resolution needed, use class name directly
+              fetch_members(type_name_scoped, callback)
+              return
+          elseif var_name then
+              -- Instance access (Var-> or Var.) -> Need to resolve variable type
+              resolve_type_recursive(bufnr, cursor_row, var_name, function(type_name, is_pointer)
+                  if type_name then
+                      -- Strict Operator Check
+                      local op = var_name_ptr and "->" or "."
+                      if op == "->" and not is_pointer then
+                           -- Warn or skip? For now, allow it but log?
+                           -- print("[blink] Warning: Used -> on non-pointer type " .. type_name)
+                      elseif op == "." and is_pointer then
+                           -- print("[blink] Warning: Used . on pointer type " .. type_name)
+                      end
+                      
+                      fetch_members(type_name, callback)
+                  else
+                      callback() -- Failed to resolve type
+                  end
+              end)
+              return
+          end
+      end
+  end
+
+  -- --------------------------------------------------------
+  -- B. Static Completions (Sync)
+  -- --------------------------------------------------------
   local context = get_context(line_text, col, self.config)
-  
   if not context then
     callback()
     return
