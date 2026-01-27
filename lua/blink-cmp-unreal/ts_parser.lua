@@ -195,4 +195,48 @@ function M.get_var_type(bufnr, target_var_name, cursor_row)
     return nil, false
 end
 
+-- 現在のカーソル位置が属するクラス名を取得する
+function M.get_current_class_name(bufnr, cursor_row)
+    local parser = vim.treesitter.get_parser(bufnr, "cpp")
+    if not parser then return nil end
+    local tree = parser:parse()[1]
+    if not tree then return nil end
+    local root = tree:root()
+    
+    local node = root:named_descendant_for_range(cursor_row, 0, cursor_row, 0)
+    while node do
+        if node:type() == "class_specifier" or node:type() == "struct_specifier" then
+            local name_node = node:field("name")[1]
+            if name_node then
+                return get_node_text(name_node, bufnr)
+            end
+        elseif node:type() == "function_definition" then
+            -- AMyClass::MyFunc の AMyClass 部分を取得
+            local declarator = node:field("declarator")[1]
+            -- declarator が pointer_declarator や reference_declarator の場合、中身を掘り下げる
+            while declarator and (declarator:type() == "pointer_declarator" or declarator:type() == "reference_declarator" or declarator:type() == "function_declarator") do
+                declarator = declarator:field("declarator")[1]
+            end
+
+            if declarator and declarator:type() == "qualified_identifier" then
+                 local scope = declarator:field("scope")[1]
+                 if scope then
+                     local class_name = get_node_text(scope, bufnr)
+                     -- 名前空間 (UE::Math::Vector) の場合は最後の部分だけ取る？ 
+                     -- いや、クラス名としては名前空間付きでOKだが、UEPはクラス名単体で登録されていることが多い
+                     -- ここでは単純に :: を除去して返す
+                     return class_name:gsub("::$", "")
+                 end
+            elseif declarator then
+                -- テキストマッチでのフォールバック
+                local text = get_node_text(declarator, bufnr)
+                local class_name = text:match("([%w_]+)::[%w_]+$")
+                if class_name then return class_name end
+            end
+        end
+        node = node:parent()
+    end
+    return nil
+end
+
 return M
