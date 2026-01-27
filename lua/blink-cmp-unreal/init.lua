@@ -94,6 +94,15 @@ local DB_STATIC = {
     { label = 'SLATE_ATTRIBUTE', documentation = 'Widget argument (value or delegate).', insertText = 'SLATE_ATTRIBUTE(${1:Type}, ${2:Name})' },
     { label = 'SLATE_EVENT', documentation = 'Widget argument (callback).', insertText = 'SLATE_EVENT(${1:DelegateType}, ${2:Name})' },
     { label = 'SLATE_BEGIN_ARGS', documentation = 'Begin args struct.', insertText = 'SLATE_BEGIN_ARGS(${1:WidgetClass})\n\t: _${2:Arg}(${3:Default})\n\t{}\n$0\nSLATE_END_ARGS()' },
+  },
+  UENUM = {
+    { label = 'BlueprintType', documentation = 'Exposes this enum as a type that can be used for variables in Blueprints.' },
+    { label = 'meta = ()', documentation = 'Metadata specifiers.', insertText = 'meta=($1)' },
+  },
+  UINTERFACE = {
+    { label = 'MinimalAPI', documentation = 'Causes only the interface type info to be exported.' },
+    { label = 'Blueprintable', documentation = 'Exposes this interface as an acceptable base for creating Blueprints.' },
+    { label = 'BlueprintType', documentation = 'Exposes this interface as a type that can be used for variables in Blueprints.' },
   }
 }
 
@@ -180,8 +189,8 @@ local function get_context(line_text, col, config)
       if before_cursor:match('meta%s*=%s*%([^%)]*$') then return { type = 'UFUNCTION', sub = 'META' } end
       return { type = 'UFUNCTION' }
     elseif macro_capture == 'UCLASS' and config.enable_uclass then return { type = 'UCLASS' }
-    elseif (macro_capture == 'USTRUCT' and config.enable_ustruct) then return { type = 'UCLASS' }
-    elseif (macro_capture == 'UINTERFACE' and config.enable_uinterface) then return { type = 'UCLASS' }
+    elseif (macro_capture == 'USTRUCT' and config.enable_ustruct) then return { type = 'USTRUCT' }
+    elseif (macro_capture == 'UINTERFACE' and config.enable_uinterface) then return { type = 'UINTERFACE' }
     elseif (macro_capture == 'UENUM' and config.enable_uenum) then return { type = 'UENUM' }
     end
   end
@@ -224,8 +233,11 @@ local function resolve_type_recursive(bufnr, cursor_row, var_name, callback)
                                         local ret_type = nil
                                         for word in m.return_type:gmatch("[%w_]+") do
                                             if not word:match("_API$") and word:match("^[AUFET]") then
-                                                ret_type = word
-                                                break
+                                                local is_likely_template_param = (#word == 1) or (word == "ElementType") or (word == "KeyType") or (word == "ValueType")
+                                                if not is_likely_template_param then
+                                                    ret_type = word
+                                                    break
+                                                end
                                             end
                                         end
                                         -- フォールバック: 従来の大文字開始マッチ
@@ -283,18 +295,30 @@ function M:get_completions(ctx, callback)
       local before_cursor = line_text:sub(1, col)
       local var_name_ptr = before_cursor:match("([%w_]+)%->[%w_]*$")
       local var_name_dot = before_cursor:match("([%w_]+)%.[%w_]*$")
-      local type_name_scoped = before_cursor:match("([%w_]+)::[%w_]*$")
+      local type_name_scoped = before_cursor:match("([%w_:]+)::[%w_]*$")
+      
+      -- [New] Function Call: GetComp()-> or GetComp<T>()->
+      local func_call_name, template_type
+      local fn_tpl, tp_tpl = before_cursor:match("([%w_]+)%s*<([%w_]+)>%s*%(.*%)%-[%>%.]+[%w_]*$")
+      if fn_tpl then
+          func_call_name = fn_tpl
+          template_type = tp_tpl
+      else
+          func_call_name = before_cursor:match("([%w_]+)%s*%(.*%)%-[%>%.]+[%w_]*$")
+      end
       
       local var_name = var_name_ptr or var_name_dot
       
       local is_static_context = (type_name_scoped ~= nil)
-      local is_instance_context = (var_name ~= nil)
+      local is_instance_context = (var_name ~= nil) or (func_call_name ~= nil)
 
-      if var_name or type_name_scoped then
+      if var_name or type_name_scoped or func_call_name then
           -- 結果を表示する共通関数
           local function fetch_members(class_name, cb)
+              -- print("DEBUG: fetch_members for " .. tostring(class_name))
               unl_api.provider.request("uep.get_class_members", { class_name = class_name }, function(ok, members)
                   if ok and members and #members > 0 then
+                      -- print("DEBUG: Got " .. #members .. " members for " .. class_name)
                       local items = {}
                       local kinds = require('blink.cmp.types').CompletionItemKind
                       for _, m in ipairs(members) do
@@ -342,7 +366,72 @@ function M:get_completions(ctx, callback)
           -- Type Resolution Logic
           if type_name_scoped then
               -- Static access (ClassName::) -> No resolution needed, use class name directly
-              fetch_members(type_name_scoped, callback)
+              fetch_members(type_name_scoped, function(res)
+                  if res and #res.items > 0 then
+                      callback(res)
+                  else
+                      -- [New] Fallback for UE-style namespaced enums (ELoadingPhase:: -> ELoadingPhase::Type::)
+                      fetch_members(type_name_scoped .. "::Type", callback)
+                  end
+              end)
+              return
+          elseif func_call_name then
+              -- print("DEBUG: Resolving func_call_name: " .. func_call_name)
+              -- [New] Function Call resolution
+              if template_type then
+                  -- If explicit template arg is provided, use it directly as the return type
+                  fetch_members(template_type, callback)
+                  return
+              end
+
+              local current_class = ts_parser.get_current_class_name(bufnr, cursor_row)
+              -- print("DEBUG: current_class: " .. tostring(current_class))
+              
+              if current_class then
+                  unl_api.provider.request("uep.get_class_members", { class_name = current_class }, function(ok, members)
+                        -- print("DEBUG: get_class_members for current_class " .. tostring(ok))
+                        if ok and members then
+                            for _, m in ipairs(members) do
+                                if m.name == func_call_name and m.type == "function" then
+                                    -- print("DEBUG: Found function in DB, return_type: " .. tostring(m.return_type))
+                                    if m.return_type and m.return_type ~= "" then
+                                        local ret_type = nil
+                                        local skip_words = {
+                                            FORCEINLINE = true,
+                                            FORCEINLINE_DEBUGGABLE = true,
+                                            PRAGMA_DISABLE_OPTIMIZATION = true,
+                                            inline = true,
+                                            virtual = true,
+                                            static = true,
+                                            const = true,
+                                            typename = true,
+                                            class = true,
+                                            struct = true,
+                                        }
+                                        for word in m.return_type:gmatch("[%w_]+") do
+                                            if not skip_words[word] and not word:match("_API$") and word:match("^[AUFET]") then
+                                                -- Ignore single character names (T) and common template parameter names
+                                                local is_likely_template_param = (#word == 1) or (word == "ElementType") or (word == "KeyType") or (word == "ValueType")
+                                                if not is_likely_template_param then
+                                                    ret_type = word
+                                                    break
+                                                end
+                                            end
+                                        end
+                                        
+                                        if ret_type then
+                                            fetch_members(ret_type, callback)
+                                            return
+                                        end
+                                    end
+                                end
+                            end
+                        end
+                        callback()
+                  end)
+              else
+                  callback()
+              end
               return
           elseif var_name then
               -- Instance access (Var-> or Var.) -> Need to resolve variable type
@@ -398,7 +487,9 @@ function M:get_completions(ctx, callback)
   elseif context.sub == 'META' then add_items(DB_STATIC.META, kind_kw)
   elseif context.type == 'UPROPERTY' then add_items(DB_STATIC.UPROPERTY, kind_kw)
   elseif context.type == 'UFUNCTION' then add_items(DB_STATIC.UFUNCTION, kind_kw)
-  elseif context.type == 'UCLASS' then add_items(DB_STATIC.UCLASS, kind_kw)
+  elseif context.type == 'UCLASS' or context.type == 'USTRUCT' then add_items(DB_STATIC.UCLASS, kind_kw)
+  elseif context.type == 'UENUM' then add_items(DB_STATIC.UENUM, kind_kw)
+  elseif context.type == 'UINTERFACE' then add_items(DB_STATIC.UINTERFACE, kind_kw)
   elseif context.type == 'DELEGATE_GLOBAL' then add_items(delegate_cache, kind_snip)
   elseif context.type == 'SLATE_GLOBAL' then add_items(DB_STATIC.SLATE, kind_snip)
   end
