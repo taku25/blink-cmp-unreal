@@ -205,33 +205,40 @@ function M.get_current_class_name(bufnr, cursor_row)
     
     local node = root:named_descendant_for_range(cursor_row, 0, cursor_row, 0)
     while node do
-        if node:type() == "class_specifier" or node:type() == "struct_specifier" then
+        local ntype = node:type()
+        if ntype == "class_specifier" or ntype == "struct_specifier" or 
+           ntype == "unreal_class_declaration" or ntype == "unreal_struct_declaration" then
             local name_node = node:field("name")[1]
             if name_node then
                 return get_node_text(name_node, bufnr)
             end
-        elseif node:type() == "function_definition" then
+        elseif ntype == "function_definition" then
             -- AMyClass::MyFunc の AMyClass 部分を取得
             local declarator = node:field("declarator")[1]
             -- declarator が pointer_declarator や reference_declarator の場合、中身を掘り下げる
-            while declarator and (declarator:type() == "pointer_declarator" or declarator:type() == "reference_declarator" or declarator:type() == "function_declarator") do
-                declarator = declarator:field("declarator")[1]
+            while declarator and (declarator:type() == "pointer_declarator" or 
+                                 declarator:type() == "reference_declarator" or 
+                                 declarator:type() == "function_declarator" or
+                                 declarator:type() == "abstract_pointer_declarator") do
+                local next_node = declarator:field("declarator")[1]
+                if not next_node then break end
+                declarator = next_node
             end
 
             if declarator and declarator:type() == "qualified_identifier" then
                  local scope = declarator:field("scope")[1]
                  if scope then
                      local class_name = get_node_text(scope, bufnr)
-                     -- 名前空間 (UE::Math::Vector) の場合は最後の部分だけ取る？ 
-                     -- いや、クラス名としては名前空間付きでOKだが、UEPはクラス名単体で登録されていることが多い
-                     -- ここでは単純に :: を除去して返す
-                     return class_name:gsub("::$", "")
+                     if class_name then
+                         return class_name:gsub("::$", "")
+                     end
                  end
-            elseif declarator then
-                -- テキストマッチでのフォールバック
-                local text = get_node_text(declarator, bufnr)
-                local class_name = text:match("([%w_]+)::[%w_]+$")
-                if class_name then return class_name end
+            end
+            -- フォールバック: テキストから AMyClass:: を探す
+            local text = get_node_text(node, bufnr)
+            if text then
+                local m = text:match("([%w_]+)::[%w_]+%s*%b()")
+                if m then return m end
             end
         end
         node = node:parent()

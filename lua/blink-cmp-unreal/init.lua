@@ -299,12 +299,12 @@ function M:get_completions(ctx, callback)
       
       -- [New] Function Call: GetComp()-> or GetComp<T>()->
       local func_call_name, template_type
-      local fn_tpl, tp_tpl = before_cursor:match("([%w_]+)%s*<([%w_]+)>%s*%(.*%)%-[%>%.]+[%w_]*$")
+      local fn_tpl, tp_tpl = before_cursor:match("([%w_]+)%s*<([%w_]+)>%s*%b()%s*%-+[%>%.]+[%w_]*$")
       if fn_tpl then
           func_call_name = fn_tpl
           template_type = tp_tpl
       else
-          func_call_name = before_cursor:match("([%w_]+)%s*%(.*%)%-[%>%.]+[%w_]*$")
+          func_call_name = before_cursor:match("([%w_]+)%s*%b()%s*%-+[%>%.]+[%w_]*$")
       end
       
       local var_name = var_name_ptr or var_name_dot
@@ -316,9 +316,8 @@ function M:get_completions(ctx, callback)
           -- 結果を表示する共通関数
           local function fetch_members(class_name, cb)
               -- print("DEBUG: fetch_members for " .. tostring(class_name))
-              unl_api.provider.request("uep.get_class_members", { class_name = class_name }, function(ok, members)
+              unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name }, function(ok, members)
                   if ok and members and #members > 0 then
-                      -- print("DEBUG: Got " .. #members .. " members for " .. class_name)
                       local items = {}
                       local kinds = require('blink.cmp.types').CompletionItemKind
                       for _, m in ipairs(members) do
@@ -377,61 +376,55 @@ function M:get_completions(ctx, callback)
               return
           elseif func_call_name then
               -- print("DEBUG: Resolving func_call_name: " .. func_call_name)
-              -- [New] Function Call resolution
               if template_type then
-                  -- If explicit template arg is provided, use it directly as the return type
                   fetch_members(template_type, callback)
                   return
               end
 
               local current_class = ts_parser.get_current_class_name(bufnr, cursor_row)
-              -- print("DEBUG: current_class: " .. tostring(current_class))
-              
-              if current_class then
-                  unl_api.provider.request("uep.get_class_members", { class_name = current_class }, function(ok, members)
-                        -- print("DEBUG: get_class_members for current_class " .. tostring(ok))
-                        if ok and members then
-                            for _, m in ipairs(members) do
-                                if m.name == func_call_name and m.type == "function" then
-                                    -- print("DEBUG: Found function in DB, return_type: " .. tostring(m.return_type))
-                                    if m.return_type and m.return_type ~= "" then
-                                        local ret_type = nil
-                                        local skip_words = {
-                                            FORCEINLINE = true,
-                                            FORCEINLINE_DEBUGGABLE = true,
-                                            PRAGMA_DISABLE_OPTIMIZATION = true,
-                                            inline = true,
-                                            virtual = true,
-                                            static = true,
-                                            const = true,
-                                            typename = true,
-                                            class = true,
-                                            struct = true,
-                                        }
-                                        for word in m.return_type:gmatch("[%w_]+") do
-                                            if not skip_words[word] and not word:match("_API$") and word:match("^[AUFET]") then
-                                                -- Ignore single character names (T) and common template parameter names
-                                                local is_likely_template_param = (#word == 1) or (word == "ElementType") or (word == "KeyType") or (word == "ValueType")
-                                                if not is_likely_template_param then
-                                                    ret_type = word
-                                                    break
-                                                end
-                                            end
-                                        end
-                                        
-                                        if ret_type then
-                                            fetch_members(ret_type, callback)
-                                            return
-                                        end
-                                    end
-                                end
-                            end
-                        end
-                        callback()
+              if not current_class then callback(); return end
+
+              -- 再帰的にメンバを探す関数 (継承対応)
+              local function find_function_return_type(class_name, target_fn, cb)
+                  unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name }, function(ok, members)
+                      if ok and members then
+                          for _, m in ipairs(members) do
+                              local m_name = m.name:gsub("%s+", "")
+                              if m_name == target_fn and m.type == "function" then
+                                  if m.return_type and m.return_type ~= "" then
+                                      local ret_class = nil
+                                      local skip_words = { 
+                                          FORCEINLINE=1, inline=1, virtual=1, const=1, static=1, 
+                                          class=1, struct=1, typename=1, enum=1, 
+                                          ENGINE_API=1, CORE_API=1
+                                      }
+                                      for word in m.return_type:gmatch("[%w_]+") do
+                                          if not skip_words[word] and not word:match("_API$") then
+                                              if word:match("^[AUFET]") then
+                                                  local is_tpl = (#word == 1) or (word == "ElementType") or (word == "KeyType") or (word == "ValueType")
+                                                  if not is_tpl then
+                                                      ret_class = word
+                                                      break
+                                                  end
+                                              end
+                                          end
+                                      end
+                                      if ret_class then cb(ret_class); return end
+                                  end
+                              end
+                          end
+                      end
+                      cb(nil)
                   end)
-              else
-                  callback()
               end
+
+              find_function_return_type(current_class, func_call_name, function(ret_type)
+                  if ret_type then
+                      fetch_members(ret_type, callback)
+                  else
+                      callback()
+                  end
+              end)
               return
           elseif var_name then
               -- Instance access (Var-> or Var.) -> Need to resolve variable type
