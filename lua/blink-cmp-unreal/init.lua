@@ -313,10 +313,12 @@ function M:get_completions(ctx, callback)
       local is_instance_context = (var_name ~= nil) or (func_call_name ~= nil)
 
       if var_name or type_name_scoped or func_call_name then
+          local current_ns = ts_parser.get_current_namespace(bufnr, cursor_row)
+          
           -- 結果を表示する共通関数
           local function fetch_members(class_name, cb)
               -- print("DEBUG: fetch_members for " .. tostring(class_name))
-              unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name }, function(ok, members)
+              unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name, current_namespace = current_ns }, function(ok, members)
                   if ok and members and #members > 0 then
                       local items = {}
                       local kinds = require('blink.cmp.types').CompletionItemKind
@@ -454,6 +456,44 @@ function M:get_completions(ctx, callback)
   -- --------------------------------------------------------
   local context = get_context(line_text, col, self.config)
   if not context then
+    -- [New] Global Type Completion (Async)
+    if unl_api_ok then
+      local before_cursor = line_text:sub(1, col)
+      local prefix = before_cursor:match("([%w_]+)$")
+      if prefix and #prefix >= 2 then
+        unl_api.provider.request("uep.search", { prefix = prefix, limit = 20 }, function(ok, results)
+          if ok and results then
+            local items = {}
+            local kinds = require('blink.cmp.types').CompletionItemKind
+            for _, res in ipairs(results) do
+              local kind = kinds.Class
+              if res.symbol_type == 'struct' or res.symbol_type == 'USTRUCT' then
+                kind = kinds.Struct
+              elseif res.symbol_type == 'enum' or res.symbol_type == 'UENUM' then
+                kind = kinds.Enum
+              elseif res.symbol_type == 'interface' or res.symbol_type == 'UINTERFACE' then
+                kind = kinds.Interface
+              end
+              
+              table.insert(items, {
+                label = res.name,
+                kind = kind,
+                insertText = res.name,
+                documentation = {
+                  kind = 'markdown',
+                  value = string.format("**%s** (%s)", res.name, res.symbol_type)
+                }
+              })
+            end
+            callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
+          else
+            callback()
+          end
+        end)
+        return
+      end
+    end
+
     callback()
     return
   end

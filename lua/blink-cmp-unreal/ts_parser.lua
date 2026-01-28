@@ -105,6 +105,34 @@ end
 
 -- 変数の定義を探し、型情報とポインタかどうかを返す
 -- @return type_name (string), is_pointer (boolean)
+function M.get_current_namespace(bufnr, row)
+    local parser = vim.treesitter.get_parser(bufnr, "cpp")
+    if not parser then return nil end
+    local tree = parser:parse()[1]
+    if not tree then return nil end
+    local root = tree:root()
+    -- TS is 0-indexed, blink-cmp context.cursor[1] is 1-indexed
+    local ts_row = row > 0 and row - 1 or 0
+    local node = root:named_descendant_for_range(ts_row, 0, ts_row, 0)
+    if not node then return nil end
+    
+    local ns_parts = {}
+    local current = node:parent()
+    while current do
+        local kind = current:type()
+        if kind == "namespace_definition" or kind == "class_specifier" or kind == "struct_specifier" then
+            local name_node = current:child_by_field_name("name")
+            if name_node then
+                table.insert(ns_parts, 1, vim.treesitter.get_node_text(name_node, bufnr))
+            end
+        end
+        current = current:parent()
+    end
+    
+    if #ns_parts == 0 then return nil end
+    return table.concat(ns_parts, "::")
+end
+
 function M.get_var_type(bufnr, target_var_name, cursor_row)
     local parser = vim.treesitter.get_parser(bufnr, "cpp")
     if not parser then return nil, false end
