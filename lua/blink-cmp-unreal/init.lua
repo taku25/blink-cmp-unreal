@@ -224,8 +224,8 @@ local function resolve_type_recursive(bufnr, cursor_row, var_name, callback)
             resolve_type_recursive(bufnr, cursor_row, obj_name, function(obj_type, obj_is_ptr)
                 if obj_type then
                     -- Obj の型が分かったので、Func の戻り値を問い合わせる
-                    unl_api.provider.request("uep.get_class_members", { class_name = obj_type }, function(ok, members)
-                        if ok and members then
+                    unl_api.db.get_class_members(obj_type, function(members)
+                        if members then
                             for _, m in ipairs(members) do
                                 if m.name == func_name then
                                     if m.return_type and m.return_type ~= "" then
@@ -318,8 +318,8 @@ function M:get_completions(ctx, callback)
           -- 結果を表示する共通関数
           local function fetch_members(class_name, cb)
               -- print("DEBUG: fetch_members for " .. tostring(class_name))
-              unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name, current_namespace = current_ns }, function(ok, members)
-                  if ok and members and #members > 0 then
+              unl_api.db.get_class_members_recursive(class_name, current_ns, function(members)
+                  if members and #members > 0 then
                       local items = {}
                       local kinds = require('blink.cmp.types').CompletionItemKind
                       for _, m in ipairs(members) do
@@ -388,8 +388,8 @@ function M:get_completions(ctx, callback)
 
               -- 再帰的にメンバを探す関数 (継承対応)
               local function find_function_return_type(class_name, target_fn, cb)
-                  unl_api.provider.request("uep.get_class_members_recursive", { class_name = class_name }, function(ok, members)
-                      if ok and members then
+                  unl_api.db.get_class_members_recursive(class_name, nil, function(members)
+                      if members then
                           for _, m in ipairs(members) do
                               local m_name = m.name:gsub("%s+", "")
                               if m_name == target_fn and m.type == "function" then
@@ -461,8 +461,8 @@ function M:get_completions(ctx, callback)
       local before_cursor = line_text:sub(1, col)
       local prefix = before_cursor:match("([%w_]+)$")
       if prefix and #prefix >= 2 then
-        unl_api.provider.request("uep.search", { prefix = prefix, limit = 20 }, function(ok, results)
-          if ok and results then
+        unl_api.db.search_classes_prefix(prefix, 20, function(results)
+          if results then
             local items = {}
             local kinds = require('blink.cmp.types').CompletionItemKind
             for _, res in ipairs(results) do
