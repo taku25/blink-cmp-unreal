@@ -1,52 +1,21 @@
 local M = {}
 
--- local ts_utils = require("nvim-treesitter.ts_utils")
-
 -- ローカル変数や引数の定義を探すクエリ
--- キャプチャ名: @type, @var_name, @value (初期化式)
+-- キャプチャ名: @type, @declarator_node
 local LOCAL_VAR_QUERY = [[
-  ;; 通常の宣言: Type Var; Type* Var;
   (declaration
     type: (_) @type
-    declarator: [
-      (identifier) @var_name
-      (pointer_declarator (identifier) @var_name)
-      (reference_declarator (identifier) @var_name)
-      (template_type) @type
-    ]
-  )
-
-  ;; 初期化付き宣言: Type Var = ...; auto Var = ...;
-  (declaration
-    type: (_) @type
-    declarator: (init_declarator
-      declarator: [
-        (identifier) @var_name
-        (pointer_declarator (identifier) @var_name)
-        (reference_declarator (identifier) @var_name)
-      ]
-      value: (_) @value
-    )
-  )
-
-  ;; 関数の引数: void Func(Type Var)
-  (parameter_declaration
-    type: (_) @type
-    declarator: [
-      (identifier) @var_name
-      (pointer_declarator (identifier) @var_name)
-      (reference_declarator (identifier) @var_name)
-    ]
+    declarator: (_) @declarator_node
   )
   
-  ;; Range-based for: for (auto& Var : Container)
+  (parameter_declaration
+    type: (_) @type
+    declarator: (_) @declarator_node
+  )
+  
   (for_range_loop
     type: (_) @type
-    declarator: [
-      (identifier) @var_name
-      (pointer_declarator (identifier) @var_name)
-      (reference_declarator (identifier) @var_name)
-    ]
+    declarator: (_) @declarator_node
   )
 ]]
 
@@ -54,6 +23,27 @@ local LOCAL_VAR_QUERY = [[
 local function get_node_text(node, bufnr)
     if not node then return nil end
     return vim.treesitter.get_node_text(node, bufnr)
+end
+
+-- ノードの中から指定した名前の識別子(identifier)を探す
+local function find_identifier_node(root_node, target_name, bufnr)
+    if root_node:type() == "identifier" then
+        if get_node_text(root_node, bufnr) == target_name then
+            return root_node
+        end
+        return nil
+    elseif root_node:type() == "field_identifier" then
+        if get_node_text(root_node, bufnr) == target_name then
+             return root_node
+        end
+        return nil
+    end
+
+    for child in root_node:iter_children() do
+        local found = find_identifier_node(child, target_name, bufnr)
+        if found then return found end
+    end
+    return nil
 end
 
 -- 型ノードから実際の型名を抽出する
@@ -151,16 +141,17 @@ function M.get_var_type(bufnr, target_var_name, cursor_row)
     
     for id, node, _ in query:iter_captures(root, bufnr, 0, cursor_row + 1) do
         local capture_name = query.captures[id]
-        if capture_name == "var_name" then
-            local var_name = get_node_text(node, bufnr)
-            if var_name == target_var_name then
-                local s_row, _, _, _ = node:range()
+        if capture_name == "declarator_node" then
+            -- declarator_node の中から identifier を探す
+            local var_node = find_identifier_node(node, target_var_name, bufnr)
+            if var_node then
+                local s_row, _, _, _ = var_node:range()
                 
                 -- カーソルより後ろの定義は無視 (ただし引数はカーソルと同じスコープとみなせる)
                 if s_row <= cursor_row then
                     if s_row > best_row then
                         best_row = s_row
-                        best_match = node -- var_name node
+                        best_match = var_node -- var_name node (identifier)
                     end
                 end
             end
@@ -169,54 +160,66 @@ function M.get_var_type(bufnr, target_var_name, cursor_row)
     
     if best_match then
         -- マッチした var_name の親や兄弟から type や value を探す
-        local parent = best_match:parent() -- declarator or parameter_declaration
-        -- もし declarator が pointer_declarator なら、それはポインタ
+        local parent = best_match:parent() 
         local is_raw_pointer = false
-        if parent:type() == "pointer_declarator" then
-            is_raw_pointer = true
-            parent = parent:parent() -- declaration or init_declarator
+
+        -- [Fix] ポインタ/参照宣言を再帰的に遡ってチェックする
+        -- declaration, init_declarator, parameter_declaration, for_range_loop に到達するまで遡る
+        while parent do
+            local p_type = parent:type()
+            if p_type == "pointer_declarator" then
+                is_raw_pointer = true
+            end
+            
+            if p_type == "declaration" or p_type == "init_declarator" or 
+               p_type == "parameter_declaration" or p_type == "for_range_loop" then
+                break
+            end
+            parent = parent:parent()
         end
-        if parent:type() == "init_declarator" then
+        
+        if parent and parent:type() == "init_declarator" then
             parent = parent:parent() -- declaration
         end
         
         -- ここで parent は declaration / parameter_declaration / for_range_loop のはず
         -- type ノードを探す
-        local type_node = parent:field("type")[1]
-        local value_node = nil
-        
-        -- init_declarator の場合、value (RHS) も探す
-        if parent:type() == "declaration" then
-            for child in parent:iter_children() do
-                if child:type() == "init_declarator" then
-                    value_node = child:field("value")[1]
-                    break
+        if parent then
+            local type_node = parent:field("type")[1]
+            local value_node = nil
+            
+            -- init_declarator の場合、value (RHS) も探す
+            if parent:type() == "declaration" then
+                for child in parent:iter_children() do
+                    if child:type() == "init_declarator" then
+                        value_node = child:field("value")[1]
+                        break
+                    end
                 end
             end
-        end
 
-        local type_text = get_node_text(type_node, bufnr)
-        
-        -- auto の場合
-        if type_text == "auto" and value_node then
-            -- RHS から推論
-            local inferred_type = infer_from_rhs(value_node, bufnr)
-            if inferred_type then
-                return inferred_type, true 
+            local type_text = get_node_text(type_node, bufnr)
+            
+            -- auto の場合
+            if type_text == "auto" and value_node then
+                -- RHS から推論
+                local inferred_type = infer_from_rhs(value_node, bufnr)
+                if inferred_type then
+                    return inferred_type, true 
+                end
+                
+                local rhs_text = get_node_text(value_node, bufnr)
+                return nil, false, rhs_text -- 3番目の戻り値としてRHSを返す
             end
             
-            local rhs_text = get_node_text(value_node, bufnr)
-            return nil, false, rhs_text -- 3番目の戻り値としてRHSを返す
-        end
-        
-        -- 通常の型定義
-        if type_node then
-            local type_name, is_smart_ptr = extract_type_name(type_node, bufnr)
-            
-            -- 生ポインタ OR スマートポインタ ならポインタ扱い
-            local is_pointer = is_raw_pointer or is_smart_ptr
-            
-            return type_name, is_pointer
+            -- 通常の型定義
+            if type_node then
+                local type_name, is_smart_ptr = extract_type_name(type_node, bufnr)
+                
+                -- 生ポインタ OR スマートポインタ ならポインタ扱い
+                local is_pointer = is_raw_pointer or is_smart_ptr
+                return type_name, is_pointer
+            end
         end
     end
     

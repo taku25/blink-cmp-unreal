@@ -207,6 +207,17 @@ end
 local function resolve_type_recursive(bufnr, cursor_row, var_name, callback)
     if not ts_parser_ok then callback(nil, false); return end
     
+    -- [New] "this" の特別対応
+    if var_name == "this" then
+        local class_name = ts_parser.get_current_class_name(bufnr, cursor_row)
+        if class_name then
+            callback(class_name, true) -- this is always a pointer
+        else
+            callback(nil, false)
+        end
+        return
+    end
+    
     -- Tree-sitterで定義を探す
     local type_name, is_pointer, rhs_text = ts_parser.get_var_type(bufnr, var_name, cursor_row)
     
@@ -262,6 +273,64 @@ local function resolve_type_recursive(bufnr, cursor_row, var_name, callback)
             return
         end
     end
+
+    -- 3. ローカルで見つからない場合、メンバ変数（this->var_name）の可能性があるため、現在のクラスメンバを検索
+    local current_class = ts_parser.get_current_class_name(bufnr, cursor_row)
+    if current_class then
+        unl_api.db.get_class_members_recursive(current_class, nil, function(members)
+            if members then
+                for _, m in ipairs(members) do
+                    if m.name == var_name then
+                         -- メンバ変数が見つかった
+                        if m.return_type and m.return_type ~= "" then
+                            -- 型名抽出 (簡易版)
+                            local ret_type = nil
+                            -- TObjectPtr<T>, T* などの処理
+                            local clean_rt = m.return_type:match("([%w_]+)%s*<[%s*]*([%w_]+)[%s%*]*>") or m.return_type
+                             
+                            -- テンプレートの中身(T) または 型名そのものを取得
+                            if m.return_type:match("<") then
+                                 local _, inner = m.return_type:match("([%w_]+)%s*<[%s*]*([%w_]+)[%s%*]*>")
+                                 ret_type = inner
+                            else
+                                 -- 最初の単語を取得 (constなどは無視したいが...簡易的に)
+                                 ret_type = m.return_type:match("([%w_]+)")
+                                 -- ポインタかどうか
+                            end
+                            
+                            -- もっと真面目に型名を抽出
+                             local skip_words = { 
+                                FORCEINLINE=1, inline=1, virtual=1, const=1, static=1, 
+                                class=1, struct=1, typename=1, enum=1, 
+                                ENGINE_API=1, CORE_API=1, override=1
+                            }
+                            
+                            local found_type = nil
+                            for word in m.return_type:gmatch("[%w_]+") do
+                                if not skip_words[word] and not word:match("_API$") then
+                                    -- A, U, F, E, T で始まる型を優先
+                                    if word:match("^[AUFET]") then
+                                        found_type = word
+                                        break
+                                    end
+                                end
+                            end
+                            found_type = found_type or ret_type
+
+                            if found_type then
+                                local is_ptr = m.return_type:find("*") ~= nil
+                                if not is_ptr and (m.return_type:find("Ptr") or m.return_type:find("Handle")) then is_ptr = true end
+                                callback(found_type, is_ptr)
+                                return
+                            end
+                        end
+                    end
+                end
+            end
+            callback(nil, false)
+        end)
+        return
+    end
     
     callback(nil, false)
 end
@@ -288,11 +357,12 @@ function M:get_completions(ctx, callback)
   local bufnr = ctx.bufnr
   local cursor_row = ctx.cursor[1]
   
+  local before_cursor = line_text:sub(1, col)
+
   -- --------------------------------------------------------
   -- A. UEP Member Completion (Async)
   -- --------------------------------------------------------
   if unl_api_ok and self.config.enable_uep_member_completion then
-      local before_cursor = line_text:sub(1, col)
       local var_name_ptr = before_cursor:match("([%w_]+)%->[%w_]*$")
       local var_name_dot = before_cursor:match("([%w_]+)%.[%w_]*$")
       local type_name_scoped = before_cursor:match("([%w_:]+)::[%w_]*$")
@@ -317,16 +387,35 @@ function M:get_completions(ctx, callback)
           
           -- 結果を表示する共通関数
           local function fetch_members(class_name, cb)
-              -- print("DEBUG: fetch_members for " .. tostring(class_name))
               unl_api.db.get_class_members_recursive(class_name, current_ns, function(members)
+                  local items = {}
+                  local kinds = require('blink.cmp.types').CompletionItemKind
+                  
                   if members and #members > 0 then
-                      local items = {}
-                      local kinds = require('blink.cmp.types').CompletionItemKind
-                      for _, m in ipairs(members) do
-                          local is_this_access = (var_name == "this")
-                          if m.access == 'private' and not is_this_access then goto continue end
+                      local current_class = ts_parser.get_current_class_name(bufnr, cursor_row)
 
-                          local is_static_member = (m.is_static == 1) or (m.type == 'enum_item')
+                      for _, m in ipairs(members) do
+                          -- [Sanitize] JSON null (vim.NIL)対策
+                          m.return_type = (type(m.return_type) == "string") and m.return_type or ""
+                          m.access = (type(m.access) == "string") and m.access or "public"
+                          m.detail = (type(m.detail) == "string") and m.detail or ""
+                          m.flags = (type(m.flags) == "string") and m.flags or ""
+                          m.class_name = (type(m.class_name) == "string") and m.class_name or ""
+                          m.name = (type(m.name) == "string") and m.name or ""
+                          m.type = (type(m.type) == "string") and m.type or ""
+
+                          -- 自クラス内アクセス判定
+                          local is_self = (current_class == m.class_name) or (var_name == "this")
+                          
+                          -- 1. アクセス権によるフィルタリング
+                          if m.access == 'private' and not is_self then goto continue end
+                          
+                          -- 2. protected は一旦許可するが、将来的に継承チェックを厳密化可能
+                          -- 3. impl (CPP定義) は、実装が見えている場合にのみ補完候補とする、
+                          --    またはヘッダーの定義と重複しないように調整されるべき (現在はサーバー側でマージ済み)
+
+                          -- 静的/インスタンスコンテキストのチェック
+                          local is_static_member = (m.is_static == 1) or (m.is_static == true) or (m.type == 'enum_item')
                           
                           if is_static_context then
                               if not is_static_member then goto continue end
@@ -335,15 +424,25 @@ function M:get_completions(ctx, callback)
                           end
 
                           local kind = kinds.Field
-                          if m.type == "function" then kind = kinds.Method
-                          elseif m.type == "property" then kind = kinds.Property
-                          elseif m.type == "enum_item" then kind = kinds.EnumMember end
+                          if m.type == "function" or m.kind == "UFunction" or m.kind == "Function" then kind = kinds.Method
+                          elseif m.type == "property" or m.kind == "UProperty" or m.kind == "Field" then kind = kinds.Property
+                          elseif m.type == "enum_item" or m.kind == "EnumItem" then kind = kinds.EnumMember end
                           
-                          local item_detail = m.detail or ""
-                          if m.flags and m.flags ~= "" then 
-                              item_detail = item_detail .. " [" .. m.flags .. "]" 
+                          local item_detail = m.return_type
+                          if m.flags ~= "" then 
+                              item_detail = "[" .. m.flags .. "] " .. item_detail
                           end
                           
+                          local type_display = (m.return_type ~= "") and m.return_type or m.type
+                          local doc_value = string.format("**%s**\n\nType: `%s`\nAccess: `%s`", m.name, type_display, m.access)
+                          if m.detail ~= "" then
+                              doc_value = doc_value .. "\nSignature: `" .. m.detail .. "`"
+                          end
+                          doc_value = doc_value .. "\n\nDefined in: `" .. (m.class_name ~= "" and m.class_name or class_name) .. "`"
+                          if m.line and m.line > 0 then
+                              doc_value = doc_value .. " (Line: " .. m.line .. ")"
+                          end
+
                           table.insert(items, {
                               label = m.name,
                               kind = kind,
@@ -352,27 +451,46 @@ function M:get_completions(ctx, callback)
                               filterText = m.name,
                               documentation = {
                                   kind = 'markdown',
-                                  value = string.format("**%s**\nType: %s\nSignature: %s\nDefined in: %s", m.name, m.type, m.detail or "N/A", m.class_name or class_name)
+                                  value = doc_value
                               }
                           })
                           ::continue::
                       end
                       cb({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
                   else
-                      cb()
+                      cb({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
                   end
               end)
           end
 
           -- Type Resolution Logic
           if type_name_scoped then
-              -- Static access (ClassName::) -> No resolution needed, use class name directly
-              fetch_members(type_name_scoped, function(res)
-                  if res and #res.items > 0 then
-                      callback(res)
+              -- Static access (ClassName::)
+              -- [New] Check if it's an Enum first
+              unl_api.db.get_enum_values(type_name_scoped, function(enum_values)
+                  if enum_values and #enum_values > 0 then
+                      local items = {}
+                      local kind_enum = require('blink.cmp.types').CompletionItemKind.EnumMember
+                      for _, val in ipairs(enum_values) do
+                          table.insert(items, {
+                              label = val,
+                              kind = kind_enum,
+                              insertText = val,
+                              filterText = val,
+                              documentation = { kind = 'markdown', value = string.format("**%s**\nEnum member of `%s`", val, type_name_scoped) }
+                          })
+                      end
+                      callback({ is_incomplete_forward = false, is_incomplete_backward = false, items = items })
                   else
-                      -- [New] Fallback for UE-style namespaced enums (ELoadingPhase:: -> ELoadingPhase::Type::)
-                      fetch_members(type_name_scoped .. "::Type", callback)
+                      -- Not an enum or no values, fallback to static members (classes/structs)
+                      fetch_members(type_name_scoped, function(res)
+                          if res and #res.items > 0 then
+                              callback(res)
+                          else
+                              -- [New] Fallback for UE-style namespaced enums (ELoadingPhase:: -> ELoadingPhase::Type::)
+                              fetch_members(type_name_scoped .. "::Type", callback)
+                          end
+                      end)
                   end
               end)
               return
@@ -392,15 +510,18 @@ function M:get_completions(ctx, callback)
                       if members then
                           for _, m in ipairs(members) do
                               local m_name = m.name:gsub("%s+", "")
-                              if m_name == target_fn and m.type == "function" then
+                              if m_name == target_fn and (m.type == "function" or m.kind == "UFunction" or m.kind == "Function") then
                                   if m.return_type and m.return_type ~= "" then
                                       local ret_class = nil
                                       local skip_words = { 
                                           FORCEINLINE=1, inline=1, virtual=1, const=1, static=1, 
                                           class=1, struct=1, typename=1, enum=1, 
-                                          ENGINE_API=1, CORE_API=1
+                                          ENGINE_API=1, CORE_API=1, override=1
                                       }
-                                      for word in m.return_type:gmatch("[%w_]+") do
+                                      -- 抽出: TObjectPtr<T> -> T,  T* -> T, etc.
+                                      local clean_rt = m.return_type:match("([%w_]+)%s*<[%s*]*([%w_]+)[%s%*]*>") or m.return_type
+                                      
+                                      for word in clean_rt:gmatch("[%w_]+") do
                                           if not skip_words[word] and not word:match("_API$") then
                                               if word:match("^[AUFET]") then
                                                   local is_tpl = (#word == 1) or (word == "ElementType") or (word == "KeyType") or (word == "ValueType")
