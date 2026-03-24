@@ -56,33 +56,34 @@ function M:get_completions(ctx, callback)
       end
       
       -- サーバーからの結果 (JSON Array) を blink.cmp の形式に変換
-      -- Expected JSON: [{ label, kind, detail, documentation, insertText, sortText, ... }]
-      -- Kind mapping: 
-      --   Function/Method = 2
-      --   Field/Variable = 5
-      --   EnumMember = 20
-      
       local items = {}
       local kinds = require('blink.cmp.types').CompletionItemKind
       
       for _, item in ipairs(result) do
           local kind = kinds.Text
-          if item.kind == 2 then kind = kinds.Method
-          elseif item.kind == 5 then kind = kinds.Field
-          elseif item.kind == 20 then kind = kinds.EnumMember
+          local raw_kind = tonumber(item.kind) or 1
+          
+          if raw_kind == 2 then kind = kinds.Method
+          elseif raw_kind == 5 then kind = kinds.Field
+          elseif raw_kind == 7 then kind = kinds.Class
+          elseif raw_kind == 12 then kind = kinds.Keyword -- Specifiers
+          elseif raw_kind == 13 then kind = kinds.Enum
+          elseif raw_kind == 15 then kind = kinds.Snippet -- Macros
+          elseif raw_kind == 20 then kind = kinds.EnumMember
           end
           
           table.insert(items, {
               label = item.label,
               kind = kind,
               detail = item.detail,
-              documentation = {
+              documentation = (item.documentation and item.documentation ~= "") and {
                   kind = 'markdown',
-                  value = item.documentation or ""
-              },
+                  value = item.documentation
+              } or nil,
               insertText = item.insertText or item.label,
               sortText = item.sortText,
-              filterText = item.filterText or item.label
+              filterText = item.filterText or item.label,
+              insertTextFormat = (item.insertText and item.insertText:find("$")) and 2 or 1, -- Snippet support
           })
       end
       
