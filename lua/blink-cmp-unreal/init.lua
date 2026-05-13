@@ -31,7 +31,7 @@ function M.new(opts)
 end
 
 function M:get_trigger_characters()
-  return { '(', ',', '.', '>', ':' }
+  return { '(', ',', '.', '>', ':', '"', '/' }
 end
 
 function M:get_completions(ctx, callback)
@@ -39,6 +39,54 @@ function M:get_completions(ctx, callback)
 
   local bufnr = ctx.bufnr
   local cursor = ctx.cursor -- [row, col] (1-based)
+
+  -- #include "..." 補完の検出
+  local current_line = vim.api.nvim_buf_get_lines(bufnr, cursor[1] - 1, cursor[1], false)[1] or ""
+  local include_prefix = current_line:match('^%s*#%s*include%s*"(.*)')
+  if include_prefix ~= nil then
+    -- カーソルより前の部分だけを prefix とする
+    local before_cursor = current_line:sub(1, cursor[2])
+    local prefix = before_cursor:match('^%s*#%s*include%s*"(.*)') or ""
+    local file_path = vim.api.nvim_buf_get_name(bufnr)
+    if file_path == "" then return callback() end
+
+    -- クォート直後の列（0-based）を計算
+    -- Lua の find は 1-based。クォートが 1-based 位置 Q にあれば、
+    -- 0-based でのクォート位置 = Q-1、クォート直後 = Q-1+1 = Q
+    local quote_pos = before_cursor:find('"') or (#before_cursor + 1)
+    local replace_start_col = quote_pos       -- 0-based: character after the "
+    local replace_end_col   = cursor[2]       -- 0-based cursor col (blink 仕様)
+    local lnum              = cursor[1] - 1   -- 0-based line
+
+    local remote = require("UNL.db.remote")
+    remote.get_include_completions(file_path, prefix, function(result, err)
+      if err or not result then return callback() end
+      local kinds = require("blink.cmp.types").CompletionItemKind
+      local items = {}
+      for _, item in ipairs(result) do
+        table.insert(items, {
+          label      = item.label,
+          kind       = kinds.File,
+          detail     = item.full_path,
+          filterText = item.label,
+          -- textEdit でクォート直後〜カーソルを label で丸ごと置換
+          textEdit = {
+            range = {
+              start   = { line = lnum, character = replace_start_col },
+              ["end"] = { line = lnum, character = replace_end_col },
+            },
+            newText = item.label,
+          },
+        })
+      end
+      callback({
+        is_incomplete_forward  = false,
+        is_incomplete_backward = false,
+        items = items,
+      })
+    end)
+    return
+  end
 
   -- Send only a window of lines around the cursor to reduce Tree-sitter parse time.
   -- Variables declared more than WINDOW_BEFORE lines above the cursor are rare enough
