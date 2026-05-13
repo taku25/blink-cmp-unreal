@@ -31,7 +31,7 @@ function M.new(opts)
 end
 
 function M:get_trigger_characters()
-  return { '(', ',', ' ', '=', '_', '.', '>', ':' }
+  return { '(', ',', '.', '>', ':' }
 end
 
 function M:get_completions(ctx, callback)
@@ -39,17 +39,32 @@ function M:get_completions(ctx, callback)
 
   local bufnr = ctx.bufnr
   local cursor = ctx.cursor -- [row, col] (1-based)
-  
-  -- バッファ内容を取得 (パフォーマンスのために必要な範囲だけ送る最適化も検討可能だが、一旦全体)
-  local lines = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
-  local content = table.concat(lines, "\n")
+
+  -- Send only a window of lines around the cursor to reduce Tree-sitter parse time.
+  -- Variables declared more than WINDOW_BEFORE lines above the cursor are rare enough
+  -- that the DB-based fallback handles them.  The enclosing class name is also found
+  -- within the class body, which is almost always within this window.
+  local WINDOW_BEFORE = 300
+  local WINDOW_AFTER  = 60
+  local all_lines   = vim.api.nvim_buf_get_lines(bufnr, 0, -1, false)
+  local total_lines = #all_lines
+
+  local win_start  = math.max(1, cursor[1] - WINDOW_BEFORE)   -- 1-based, inclusive
+  local win_end    = math.min(total_lines, cursor[1] + WINDOW_AFTER) -- 1-based, inclusive
+  local win_lines  = vim.list_slice(all_lines, win_start, win_end)
+  local content    = table.concat(win_lines, "\n")
+
+  -- cursor[1] is 1-based; server expects 0-based line relative to the sent content.
+  local adjusted_line = cursor[1] - win_start  -- 0-based inside the window
+
   local file_path = vim.api.nvim_buf_get_name(bufnr)
   
   unl_api.db.get_completions({
     content = content,
-    line = cursor[1] - 1, -- 0-based for server
+    line = adjusted_line,
     character = cursor[2], -- 0-based (カーソル位置は文字の直後)
-    file_path = file_path
+    file_path = file_path,
+    absolute_line = cursor[1] - 1, -- 0-based absolute line in file
   }, function(result, err)
       if err or not result then
           return callback()
