@@ -31,7 +31,7 @@ function M.new(opts)
 end
 
 function M:get_trigger_characters()
-  return { '(', ',', '.', '>', ':', '"', '/' }
+  return { '(', ',', '.', '>', ':', '"', '/', '<' }
 end
 
 function M:get_completions(ctx, callback)
