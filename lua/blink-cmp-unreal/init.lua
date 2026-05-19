@@ -133,12 +133,16 @@ function M:get_completions(ctx, callback)
           local raw_kind = tonumber(item.kind) or 1
           
           if raw_kind == 2 then kind = kinds.Method
+          elseif raw_kind == 3 then kind = kinds.Function
           elseif raw_kind == 5 then kind = kinds.Field
+          elseif raw_kind == 6 then kind = kinds.Variable
           elseif raw_kind == 7 then kind = kinds.Class
+          elseif raw_kind == 9 then kind = kinds.Module
           elseif raw_kind == 12 then kind = kinds.Keyword -- Specifiers
           elseif raw_kind == 13 then kind = kinds.Enum
           elseif raw_kind == 15 then kind = kinds.Snippet -- Macros
           elseif raw_kind == 20 then kind = kinds.EnumMember
+          elseif raw_kind == 25 then kind = kinds.TypeParameter
           end
 
           -- マクロプレフィックスのとき: define を先頭に、それ以外を末尾に押しやる
