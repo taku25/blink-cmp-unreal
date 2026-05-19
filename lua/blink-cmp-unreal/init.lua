@@ -118,6 +118,12 @@ function M:get_completions(ctx, callback)
           return callback()
       end
       
+      -- カーソル直前の単語を取得して、マクロパターン（大文字＋アンダースコア）か判定する。
+      -- 例: "UE_", "WITH_", "PLATFORM_", "UE_DOUBLE" など
+      local line_before_cursor = current_line:sub(1, cursor[2])
+      local word_before = line_before_cursor:match("[A-Z][A-Z0-9_]*$") or ""
+      local is_macro_prefix = word_before:match("^[A-Z][A-Z0-9_]+") ~= nil
+
       -- サーバーからの結果 (JSON Array) を blink.cmp の形式に変換
       local items = {}
       local kinds = require('blink.cmp.types').CompletionItemKind
@@ -134,6 +140,16 @@ function M:get_completions(ctx, callback)
           elseif raw_kind == 15 then kind = kinds.Snippet -- Macros
           elseif raw_kind == 20 then kind = kinds.EnumMember
           end
+
+          -- マクロプレフィックスのとき: define を先頭に、それ以外を末尾に押しやる
+          local sort_text = item.sortText
+          if is_macro_prefix then
+            if item.detail == "define" then
+              sort_text = "0_" .. (item.label or "")
+            else
+              sort_text = "z_" .. (item.label or "")
+            end
+          end
           
           table.insert(items, {
               label = item.label,
@@ -144,14 +160,14 @@ function M:get_completions(ctx, callback)
                   value = item.documentation
               } or nil,
               insertText = item.insertText or item.label,
-              sortText = item.sortText,
+              sortText = sort_text,
               filterText = item.filterText or item.label,
               insertTextFormat = (item.insertText and item.insertText:find("$")) and 2 or 1, -- Snippet support
           })
       end
       
       callback({
-        is_incomplete_forward = false,
+        is_incomplete_forward = is_macro_prefix,
         is_incomplete_backward = false,
         items = items,
       })
